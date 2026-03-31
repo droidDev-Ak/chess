@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply m-0 p-0 box-border bg-dark-900 text-gray-100 font-sans min-h-screen antialiased selection:bg-blue-500 selection:text-white;
+    display: flex;
+    place-items: center;
+    justify-content: center;
+  }
+
+  #root {
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
