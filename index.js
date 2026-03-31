@@ -301,7 +301,7 @@ async function updateRatings(game, winner, reason) {
     }
 }
 
-const PORT = 8000;
+const PORT = process.env.PORT || 8000;
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/chess-game";
 
 mongoose
