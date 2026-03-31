@@ -10,11 +10,11 @@ export default function ChessBoardComponent({
   socket,
   isConnected,
   role,
+  bothPlayersPresent,
 }) {
   const initialFen = !fen || fen === "start" ? START_FEN : fen;
   const [displayFen, setDisplayFen] = useState(initialFen);
 
-  // Sync local display state whenever the confirmed server FEN changes
   useEffect(() => {
     if (fen && fen !== "start") {
       setDisplayFen(fen);
@@ -23,10 +23,7 @@ export default function ChessBoardComponent({
     }
   }, [fen]);
 
-  // react-chessboard v5: onPieceDrop receives { piece, sourceSquare, targetSquare }
   const onDrop = ({ sourceSquare, targetSquare }) => {
-    console.log("🎯 onDrop:", sourceSquare, "->", targetSquare);
-
     if (role === "spectator") return false;
     if (!isConnected) return false;
     if (!socket) return false;
@@ -36,7 +33,6 @@ export default function ChessBoardComponent({
       const currentFen = !fen || fen === "start" ? START_FEN : fen;
       chessValidator.load(currentFen);
     } catch (e) {
-      console.error("Error loading FEN:", e);
       return false;
     }
 
@@ -60,24 +56,22 @@ export default function ChessBoardComponent({
     }
 
     setDisplayFen(chessValidator.fen());
-    console.log("📡 Sending move:", { from: sourceSquare, to: targetSquare });
     socket.emit("move", { from: sourceSquare, to: targetSquare, promotion: "q" });
 
     return true;
   };
 
-  // react-chessboard v5: ALL config goes inside the options prop
   const boardOptions = {
     id: "main-board",
     position: displayFen,
     onPieceDrop: onDrop,
-    allowDragging: true,
+    allowDragging: bothPlayersPresent && role !== "spectator",
     boardOrientation: playerColor === "black" ? "black" : "white",
     animationDurationInMs: 200,
   };
 
   return (
-    <div style={{ width: "100%", maxWidth: "600px", aspectRatio: "1 / 1", margin: "0 auto" }}>
+    <div style={{ width: "100%", maxWidth: "min(600px, 65vh)", margin: "0 auto" }}>
       <Chessboard options={boardOptions} />
     </div>
   );
