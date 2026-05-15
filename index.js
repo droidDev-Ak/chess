@@ -35,35 +35,32 @@ const GHOST_DEPTH = parseInt(process.env.GHOST_STOCKFISH_DEPTH || "15", 10);
 const GHOST_CHARGES_PER_PLAYER = 3;
 
 async function getBestMove(fen, depth) {
-    return new Promise(async (resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Stockfish timeout")), 20000);
-
-        try {
-            const initStockfish = require("stockfish");
-            const engine = await initStockfish();
-
-            engine.addMessageListener((msg) => {
-                if (typeof msg === "string" && msg.startsWith("bestmove")) {
-                    clearTimeout(timeout);
-                    const parts = msg.split(" ");
-                    const best = parts[1];
-                    if (best && best !== "(none)") {
-                        resolve(best);
-                    } else {
-                        reject(new Error("No valid best move"));
+    return new Promise((resolve, reject) => {
+        const encodedFen = encodeURIComponent(fen);
+        const url = `https://stockfish.online/api/s/v2.php?fen=${encodedFen}&depth=${depth}`;
+        
+        const https = require('https');
+        https.get(url, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    if (json && json.success && json.bestmove) {
+                        const parts = json.bestmove.split(" ");
+                        const best = parts[1];
+                        if (best && best !== "(none)") {
+                            return resolve(best);
+                        }
                     }
+                    reject(new Error("Invalid response from Stockfish API"));
+                } catch (e) {
+                    reject(e);
                 }
             });
-
-            engine.sendCommand("uci");
-            engine.sendCommand("isready");
-            engine.sendCommand("ucinewgame");
-            engine.sendCommand(`position fen ${fen}`);
-            engine.sendCommand(`go depth ${depth}`);
-        } catch (err) {
-            clearTimeout(timeout);
+        }).on('error', (err) => {
             reject(err);
-        }
+        });
     });
 }
 
