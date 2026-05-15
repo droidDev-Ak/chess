@@ -7,6 +7,7 @@ const http = require("http");
 const mongoose = require("mongoose");
 const { Chess } = require("chess.js");
 const crypto = require("crypto");
+const { OpenAI } = require("openai");
 
 const authRoutes = require("./routes/auth");
 const { socketAuthMiddleware } = require("./middleware/auth");
@@ -24,7 +25,64 @@ app.use("/api/auth", authRoutes);
 io.use(socketAuthMiddleware);
 
 const games = new Map();
-const userGames = new Map(); 
+const userGames = new Map();
+
+const openai = process.env.OPENAI_API_KEY
+    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    : null;
+
+const GHOST_DEPTH = parseInt(process.env.GHOST_STOCKFISH_DEPTH || "15", 10);
+const GHOST_CHARGES_PER_PLAYER = 3;
+
+async function getBestMove(fen, depth) {
+    return new Promise(async (resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Stockfish timeout")), 20000);
+
+        try {
+            const initStockfish = require("stockfish");
+            const engine = await initStockfish();
+
+            engine.addMessageListener((msg) => {
+                if (typeof msg === "string" && msg.startsWith("bestmove")) {
+                    clearTimeout(timeout);
+                    const parts = msg.split(" ");
+                    const best = parts[1];
+                    if (best && best !== "(none)") {
+                        resolve(best);
+                    } else {
+                        reject(new Error("No valid best move"));
+                    }
+                }
+            });
+
+            engine.sendCommand("uci");
+            engine.sendCommand("isready");
+            engine.sendCommand("ucinewgame");
+            engine.sendCommand(`position fen ${fen}`);
+            engine.sendCommand(`go depth ${depth}`);
+        } catch (err) {
+            clearTimeout(timeout);
+            reject(err);
+        }
+    });
+}
+
+
+async function getAiSummary(pgn, white, black) {
+    if (!openai) return null;
+    try {
+        const prompt = `You are a chess grandmaster commentator. Analyze this chess game PGN and provide a brief, engaging post-game summary (3-4 sentences) covering: key turning points, any major blunders, brilliant moves, and how the game was decided. Be specific about move numbers and piece names. White: ${white}, Black: ${black}.\n\nPGN:\n${pgn}`;
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 400,
+            temperature: 0.7,
+        });
+        return completion.choices[0]?.message?.content?.trim() || null;
+    } catch {
+        return null;
+    }
+}
 
 io.on("connection", (socket) => {
     socket.emit("auth-success", { user: socket.user });
@@ -41,11 +99,16 @@ io.on("connection", (socket) => {
             },
             spectators: [],
             messages: [],
+            ghostCharges: {
+                white: GHOST_CHARGES_PER_PLAYER,
+                black: GHOST_CHARGES_PER_PLAYER,
+            },
         });
         userGames.set(socket.id, gameId);
 
         socket.join(gameId);
         socket.emit("game-created", { gameId });
+        socket.emit("ghost-charge-update", { charges: GHOST_CHARGES_PER_PLAYER });
     });
 
     socket.on("join-game", ({ gameId }) => {
@@ -69,7 +132,6 @@ io.on("connection", (socket) => {
             game.players.black = { socketId: socket.id, user: socket.user };
             assignedColor = "black";
         } else {
-            
             game.spectators.push({ socketId: socket.id, user: socket.user });
             userGames.set(socket.id, gameId);
             socket.join(gameId);
@@ -91,6 +153,10 @@ io.on("connection", (socket) => {
             color: assignedColor,
             fen: game.chess.fen(),
             messages: game.messages,
+        });
+
+        socket.emit("ghost-charge-update", {
+            charges: game.ghostCharges[assignedColor],
         });
 
         if (game.players.white && game.players.black) {
@@ -152,19 +218,118 @@ io.on("connection", (socket) => {
 
                 let winner = "none";
                 if (reason === "checkmate") {
-                    winner = turn; 
+                    winner = turn;
                 }
+
+                const pgn = game.chess.pgn();
+                const whiteName = game.players.white.user.username;
+                const blackName = game.players.black.user.username;
 
                 updateRatings(game, winner, reason).then((ratingUpdate) => {
                     io.to(gameId).emit("game-over", {
                         winner,
                         reason,
-                        ratingUpdate, 
+                        ratingUpdate,
+                    });
+
+                    getAiSummary(pgn, whiteName, blackName).then((summary) => {
+                        io.to(gameId).emit("ai-summary", {
+                            summary: summary || "Game analysis is currently unavailable.",
+                        });
                     });
                 });
             }
         } catch (err) {
             socket.emit("error", { message: "Invalid move" });
+        }
+    });
+
+    socket.on("ghost-move", async () => {
+        const gameId = userGames.get(socket.id);
+        if (!gameId) return socket.emit("error", { message: "You are not in a game" });
+
+        const game = games.get(gameId);
+        if (!game) return socket.emit("error", { message: "Game not found" });
+
+        if (game.chess.isGameOver()) {
+            return socket.emit("error", { message: "The game is already over" });
+        }
+
+        if (!game.players.white || !game.players.black) {
+            return socket.emit("error", { message: "Waiting for opponent to join" });
+        }
+
+        const isWhite = game.players.white && game.players.white.socketId === socket.id;
+        const isBlack = game.players.black && game.players.black.socketId === socket.id;
+
+        if (!isWhite && !isBlack) {
+            return socket.emit("error", { message: "Spectators cannot use Ghost Mode" });
+        }
+
+        const turn = game.chess.turn() === "w" ? "white" : "black";
+        const playerColor = isWhite ? "white" : "black";
+
+        if (turn !== playerColor) {
+            return socket.emit("error", { message: "It is not your turn" });
+        }
+
+        if (game.ghostCharges[playerColor] <= 0) {
+            return socket.emit("error", { message: "No Ghost Mode charges remaining" });
+        }
+
+        game.ghostCharges[playerColor] -= 1;
+        const remaining = game.ghostCharges[playerColor];
+
+        socket.emit("ghost-charge-update", { charges: remaining });
+
+        try {
+            const bestMoveUci = await getBestMove(game.chess.fen(), GHOST_DEPTH);
+
+            const from = bestMoveUci.slice(0, 2);
+            const to = bestMoveUci.slice(2, 4);
+            const promotion = bestMoveUci.length === 5 ? bestMoveUci[4] : "q";
+
+            const move = game.chess.move({ from, to, promotion });
+
+            if (!move) {
+                game.ghostCharges[playerColor] += 1;
+                socket.emit("ghost-charge-update", { charges: game.ghostCharges[playerColor] });
+                return socket.emit("error", { message: "Ghost Mode could not find a valid move" });
+            }
+
+            io.to(gameId).emit("move-made", {
+                move,
+                fen: game.chess.fen(),
+                turn: game.chess.turn() === "w" ? "white" : "black",
+            });
+
+            if (game.chess.isGameOver()) {
+                let reason = "unknown";
+                if (game.chess.isCheckmate()) reason = "checkmate";
+                else if (game.chess.isStalemate()) reason = "stalemate";
+                else if (game.chess.isDraw()) reason = "draw";
+
+                let winner = "none";
+                if (reason === "checkmate") winner = playerColor;
+
+                const pgn = game.chess.pgn();
+                const whiteName = game.players.white.user.username;
+                const blackName = game.players.black.user.username;
+
+                updateRatings(game, winner, reason).then((ratingUpdate) => {
+                    io.to(gameId).emit("game-over", { winner, reason, ratingUpdate });
+
+                    getAiSummary(pgn, whiteName, blackName).then((summary) => {
+                        io.to(gameId).emit("ai-summary", {
+                            summary: summary || "Game analysis is currently unavailable.",
+                        });
+                    });
+                });
+            }
+        } catch (err) {
+            game.ghostCharges[playerColor] += 1;
+            socket.emit("ghost-charge-update", { charges: game.ghostCharges[playerColor] });
+            socket.emit("error", { message: "Ghost Mode failed. Please try again." });
         }
     });
 
@@ -176,7 +341,7 @@ io.on("connection", (socket) => {
 
         const isWhite = game.players.white && game.players.white.socketId === socket.id;
         const isBlack = game.players.black && game.players.black.socketId === socket.id;
-        
+
         const message = {
             id: Date.now() + Math.random(),
             user: socket.user,
@@ -184,7 +349,7 @@ io.on("connection", (socket) => {
             time: new Date().toISOString(),
             isSpectator: !isWhite && !isBlack,
         };
-        
+
         game.messages.push(message);
         io.to(gameId).emit("receive-message", message);
     });
@@ -234,6 +399,15 @@ io.on("connection", (socket) => {
                         ratingUpdate,
                         message: `${socket.user.username} left the game. ${winner} wins!`,
                     });
+
+                    const pgn = game.chess.pgn();
+                    if (pgn) {
+                        getAiSummary(pgn, savedWhite.user.username, savedBlack.user.username).then((summary) => {
+                            io.to(gameId).emit("ai-summary", {
+                                summary: summary || "Game analysis is currently unavailable.",
+                            });
+                        });
+                    }
                 });
             } else if (wasPlayer) {
                 io.to(gameId).emit("player-disconnected", {
@@ -307,8 +481,7 @@ const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/chess-game
 mongoose
     .connect(MONGO_URI)
     .then(() => {
-        server.listen(PORT, () => {
-        });
+        server.listen(PORT, () => {});
     })
     .catch((err) => {
         process.exit(1);

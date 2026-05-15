@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 import ChessBoardComponent from "./components/ChessBoard.jsx";
 import AuthPage from "./components/AuthPage.jsx";
+import GameOverModal from "./components/GameOverModal.jsx";
 import axios from "axios";
 import "./index.css";
 
@@ -9,7 +10,6 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 const API = `${BACKEND_URL}/api/auth`;
 
 function App() {
-  
   const [token, setToken] = useState(localStorage.getItem("chess-token"));
   const [currentUser, setCurrentUser] = useState(() => {
     const stored = localStorage.getItem("chess-user");
@@ -31,12 +31,16 @@ function App() {
   const [blackPlayer, setBlackPlayer] = useState(null);
   const [ratingUpdate, setRatingUpdate] = useState(null);
 
-  // Chat state
   const [messages, setMessages] = useState([]);
   const [reaction, setReaction] = useState(null);
   const [chatInput, setChatInput] = useState("");
 
   const [uploading, setUploading] = useState(false);
+
+  const [ghostCharges, setGhostCharges] = useState(3);
+  const [isGhostLoading, setIsGhostLoading] = useState(false);
+  const [aiSummary, setAiSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -58,6 +62,9 @@ function App() {
       setGameId(gameId);
       setPlayerColor("white");
       setRole("player");
+      setGhostCharges(3);
+      setAiSummary(null);
+      setSummaryLoading(false);
     });
 
     s.on("game-joined", ({ gameId, color, role, fen, white, black, messages }) => {
@@ -68,6 +75,9 @@ function App() {
       if (white) setWhitePlayer(white);
       if (black) setBlackPlayer(black);
       if (messages) setMessages(messages);
+      setGhostCharges(3);
+      setAiSummary(null);
+      setSummaryLoading(false);
     });
 
     s.on("game-started", ({ fen, turn, white, black, messages }) => {
@@ -78,17 +88,22 @@ function App() {
       setWhitePlayer(white);
       setBlackPlayer(black);
       if (messages) setMessages(messages);
+      setAiSummary(null);
+      setSummaryLoading(false);
     });
 
     s.on("move-made", ({ fen, turn }) => {
       setFen(fen);
       setTurn(turn);
+      setIsGhostLoading(false);
     });
 
     s.on("game-over", ({ winner, reason, ratingUpdate }) => {
       setWinner({ player: winner, reason });
       if (ratingUpdate) setRatingUpdate(ratingUpdate);
-      
+      setSummaryLoading(true);
+      setIsGhostLoading(false);
+
       if (ratingUpdate && currentUser) {
         const myUpdate =
           playerColor === "white" ? ratingUpdate.white : ratingUpdate.black;
@@ -98,6 +113,15 @@ function App() {
           localStorage.setItem("chess-user", JSON.stringify(updated));
         }
       }
+    });
+
+    s.on("ai-summary", ({ summary }) => {
+      setAiSummary(summary);
+      setSummaryLoading(false);
+    });
+
+    s.on("ghost-charge-update", ({ charges }) => {
+      setGhostCharges(charges);
     });
 
     s.on("receive-message", (msg) => {
@@ -116,6 +140,7 @@ function App() {
     s.on("error", ({ message }) => {
       alert(message);
       setBoardKey((k) => k + 1);
+      setIsGhostLoading(false);
     });
 
     s.on("connect_error", (err) => {
@@ -197,6 +222,16 @@ function App() {
     setMessages([]);
     setReaction(null);
     setChatInput("");
+    setGhostCharges(3);
+    setAiSummary(null);
+    setSummaryLoading(false);
+    setIsGhostLoading(false);
+  };
+
+  const handleGhostMove = () => {
+    if (!socket || isGhostLoading) return;
+    setIsGhostLoading(true);
+    socket.emit("ghost-move");
   };
 
   if (!token || !currentUser) {
@@ -206,7 +241,7 @@ function App() {
   const isSpectator = role === "spectator";
   const bothPlayersPresent = whitePlayer && blackPlayer;
   const isMyTurn = !isSpectator && turn === playerColor;
-  
+
   const statusLabel = !bothPlayersPresent
     ? "Waiting for opponent..."
     : isSpectator
@@ -221,7 +256,6 @@ function App() {
   if (!gameId) {
     return (
       <div className="w-full max-w-md p-8 space-y-6 bg-dark-800 rounded-2xl shadow-2xl border border-dark-700 mx-auto mt-20">
-        
         <div className="flex items-center gap-4 pb-4 border-b border-dark-700">
           <label className="relative cursor-pointer group">
             <div className="w-14 h-14 rounded-full bg-dark-700 overflow-hidden border-2 border-dark-600 group-hover:border-blue-500 transition">
@@ -351,51 +385,15 @@ function App() {
   return (
     <div className="w-full min-h-screen p-4 md:p-8 flex flex-col md:flex-row gap-8 items-center md:items-start justify-center">
       <div className="flex-1 bg-dark-800 p-4 md:p-8 rounded-2xl shadow-2xl border border-dark-700 w-full flex items-center justify-center relative">
-        
-        {winner && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-dark-900/80 backdrop-blur-sm rounded-2xl">
-            <div className="text-center bg-dark-800 p-8 rounded-2xl border border-dark-600 shadow-2xl">
-              <h2 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-yellow-400 to-yellow-600 mb-2">
-                Game Over!
-              </h2>
-              <p className="text-xl text-white mb-1">
-                {winner.player === "none"
-                  ? "Draw"
-                  : `${winner.player.charAt(0).toUpperCase() + winner.player.slice(1)} wins!`}
-              </p>
-              <p className="text-gray-400 capitalize mb-4">by {winner.reason}</p>
-
-              {ratingUpdate && (
-                <div className="flex justify-center gap-6 mb-6">
-                  {[
-                    { label: "White", data: ratingUpdate.white, player: whitePlayer },
-                    { label: "Black", data: ratingUpdate.black, player: blackPlayer },
-                  ].map(({ label, data, player }) => (
-                    <div key={label} className="text-center">
-                      <p className="text-gray-400 text-xs mb-1">{player?.username}</p>
-                      <p className="text-white text-lg font-bold">{data.newRating}</p>
-                      <p
-                        className={`text-sm font-semibold ${
-                          data.change >= 0 ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {data.change >= 0 ? "+" : ""}
-                        {data.change}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <button
-                onClick={leaveGame}
-                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-semibold transition shadow-lg shadow-blue-500/30"
-              >
-                Back to Lobby
-              </button>
-            </div>
-          </div>
-        )}
+        <GameOverModal
+          winner={winner}
+          ratingUpdate={ratingUpdate}
+          whitePlayer={whitePlayer}
+          blackPlayer={blackPlayer}
+          aiSummary={aiSummary}
+          summaryLoading={summaryLoading}
+          onLeave={leaveGame}
+        />
 
         {reaction && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none animate-bounce flex flex-col items-center">
@@ -414,11 +412,14 @@ function App() {
           socket={socket}
           role={role}
           bothPlayersPresent={bothPlayersPresent}
+          ghostCharges={ghostCharges}
+          onGhostMove={handleGhostMove}
+          isMyTurn={isMyTurn}
+          isGhostLoading={isGhostLoading}
         />
       </div>
 
       <div className="w-full md:w-80 bg-dark-800 p-6 rounded-2xl shadow-xl border border-dark-700 space-y-4">
-        
         <div>
           <h2 className="text-sm uppercase tracking-widest text-gray-500 mb-1">Game ID</h2>
           <div className="font-mono text-xl text-blue-400 bg-dark-900 px-4 py-2 rounded-xl border border-dark-700 select-all tracking-wider text-center">
@@ -454,7 +455,41 @@ function App() {
           </div>
         </div>
 
-        {/* Chat UI */}
+        {role === "player" && (
+          <div>
+            <h2 className="text-sm uppercase tracking-widest text-gray-500 mb-1">Ghost Mode</h2>
+            <div
+              style={{
+                background: "rgba(124,58,237,0.06)",
+                border: "1px solid rgba(124,58,237,0.2)",
+              }}
+              className="p-3 rounded-xl flex items-center gap-3"
+            >
+              <span className="text-xl">👻</span>
+              <div className="flex-1">
+                <p className="text-purple-300 text-sm font-semibold">AI Co-Pilot</p>
+                <p className="text-gray-500 text-xs">{ghostCharges} charge{ghostCharges !== 1 ? "s" : ""} remaining</p>
+              </div>
+              <div className="flex gap-1.5">
+                {[...Array(3)].map((_, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      width: "8px",
+                      height: "8px",
+                      borderRadius: "50%",
+                      background: i < ghostCharges
+                        ? "linear-gradient(135deg, #a78bfa, #818cf8)"
+                        : "rgba(167,139,250,0.2)",
+                      boxShadow: i < ghostCharges ? "0 0 5px rgba(167,139,250,0.5)" : "none",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-col h-64 bg-dark-900 rounded-xl border border-dark-700 overflow-hidden">
           <div className="flex-1 overflow-y-auto p-3 space-y-2 text-sm flex flex-col-reverse">
             <div className="space-y-2 flex flex-col justify-end">
